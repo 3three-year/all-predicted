@@ -242,6 +242,84 @@ def plot_test_pv_utilization_comparison(algorithm_pv_data, test_dates, day_indic
         print(f"[DONE] Generated: {output_dir}/{filename}")
 
 
+def plot_windowed_pv_utilization_comparison(algorithm_day_data, test_dates, output_dir='output_image',
+                                            window_start_hour=8, window_end_hour=16):
+    """
+    图8: 典型日光伏消纳率时段汇总对比图（每个典型日生成一张独立图）
+
+    口径说明：
+    - 仅统计 [window_start_hour, window_end_hour) 时段
+    - 光伏消纳率 = 时段内消纳的光伏电量 / 时段总光伏发电量
+    - 其中，时段内消纳的光伏电量 = Σ min(该时刻负荷, 该时刻光伏)
+    - 采用时段总量计算，而不是逐时刻平均
+
+    Args:
+        algorithm_day_data: dict, {算法名: [{'window_load_energy_kwh': ..., 'window_pv_energy_kwh': ..., 'window_pv_utilization': ...}, ...]}
+        test_dates: list, 典型日期列表（格式：'MM-DD'）
+        output_dir: 输出目录
+        window_start_hour: 时段起始小时
+        window_end_hour: 时段结束小时，右开区间
+    """
+    algorithms = list(algorithm_day_data.keys())
+    n_days = len(test_dates)
+
+    colors = {
+        'Baseline': '#6C757D',
+        'DDQN': '#2E86AB',
+        'T-DDQN': '#A23B72',
+        'PPO': '#F18F01',
+        'Ablation': '#C73E1D'
+    }
+
+    for day_num in range(n_days):
+        fig, ax = plt.subplots(figsize=(11, 8))
+
+        x = np.arange(len(algorithms))
+        width = 0.62
+
+        util_values = []
+        for algo_name in algorithms:
+            day_metrics = algorithm_day_data.get(algo_name, [])
+            if day_num < len(day_metrics):
+                metrics = day_metrics[day_num]
+                util_values.append(metrics.get('window_pv_utilization', 0.0) * 100)
+            else:
+                util_values.append(0.0)
+
+        bars = []
+        for i, (algo_name, util_value) in enumerate(zip(algorithms, util_values)):
+            color = colors.get(algo_name, '#000000')
+            bar = ax.bar(i, util_value, width,
+                         label=algo_name, color=color, alpha=0.88,
+                         edgecolor='black', linewidth=0.8)
+            bars.append(bar)
+
+        ax.set_xlabel('算法', fontsize=13, fontweight='bold')
+        ax.set_ylabel('光伏消纳率 (%)', fontsize=13, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(algorithms, fontsize=11)
+        ax.set_ylim(0, max(105, max(util_values) * 1.2 if util_values else 105))
+        ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8, axis='y')
+
+        for i, util_value in enumerate(util_values):
+            ax.text(i, util_value + 1.5, f'{util_value:.1f}%',
+                    ha='center', va='bottom', fontsize=11, fontweight='bold')
+
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.2)
+
+        plt.tight_layout()
+        os.makedirs(output_dir, exist_ok=True)
+
+        date_str = test_dates[day_num] if day_num < len(test_dates) else f'day{day_num+1}'
+        filename = f'08{chr(97 + day_num)}_典型日{day_num+1}光伏时段消纳率_{date_str}.png'
+        plt.savefig(os.path.join(output_dir, filename),
+                    dpi=300, bbox_inches='tight', facecolor='white')
+        plt.close()
+
+        print(f"[DONE] Generated: {output_dir}/{filename}")
+
+
 def plot_test_peak_valley_comparison(algorithm_loads, baseline_loads, test_dates, output_dir='output_image', 
                                     day_indices=None, base_loads=None, pv_data=None):
     """
@@ -679,6 +757,89 @@ def plot_ev_load_comparison(algorithm_ev_loads, baseline_ev_loads, real_ev_loads
                     dpi=300, bbox_inches='tight', facecolor='white')
         plt.close()
         
+        print(f"[DONE] Generated: {output_dir}/{filename}")
+
+
+def plot_v2g_discharge_power_comparison(algorithm_ev_loads, real_ev_loads,
+                                        test_dates, day_indices, output_dir='output_image'):
+    """
+    图9: 典型日V2G放电功率对比图（每个典型日生成一张图）
+
+    口径说明：
+    - 基于EV负荷曲线提取V2G放电功率
+    - EV负荷<0 时视为放电，绘图时转换为正值功率
+    - EV负荷>=0 时记为0，不显示充电部分
+    """
+    colors = {
+        'Real EV': '#808080',
+        'DDQN': '#2E86AB',
+        'T-DDQN': '#A23B72',
+        'PPO': '#F18F01',
+        'Ablation': '#C73E1D'
+    }
+
+    linestyles = {
+        'Real EV': ':',
+        'DDQN': '-',
+        'T-DDQN': '--',
+        'PPO': '-.',
+        'Ablation': ':'
+    }
+
+    for day_num, (day_idx, date_str) in enumerate(zip(day_indices, test_dates), 1):
+        fig, ax = plt.subplots(figsize=(16, 8))
+
+        time_steps = np.arange(96)
+        time_labels = [f'{h:02d}:{m:02d}' for h in range(24) for m in [0, 15, 30, 45]]
+
+        start_idx = day_idx * 96
+        end_idx = start_idx + 96
+
+        if real_ev_loads is not None and end_idx <= len(real_ev_loads):
+            real_ev_day = np.array(real_ev_loads[start_idx:end_idx], dtype=float)
+            real_v2g_day = np.maximum(-real_ev_day, 0.0)
+            ax.plot(time_steps, real_v2g_day, label='真实V2G放电功率（未调度）',
+                    color=colors['Real EV'], linewidth=3.0, alpha=0.8,
+                    linestyle=linestyles['Real EV'], zorder=1)
+
+        for algo_name, ev_loads_data in algorithm_ev_loads.items():
+            if end_idx > len(ev_loads_data):
+                print(f"警告：{algo_name} 第{day_idx}天V2G数据超出范围")
+                continue
+
+            algo_ev_day = np.array(ev_loads_data[start_idx:end_idx], dtype=float)
+            algo_v2g_day = np.maximum(-algo_ev_day, 0.0)
+
+            color = colors.get(algo_name, '#000000')
+            linestyle = linestyles.get(algo_name, '-')
+            ax.plot(time_steps, algo_v2g_day, label=f'{algo_name}',
+                    color=color, linewidth=2.5, alpha=0.85,
+                    linestyle=linestyle, zorder=3)
+
+        ax.set_xlabel('时间', fontsize=13, fontweight='bold')
+        ax.set_ylabel('V2G放电功率 (kW)', fontsize=13, fontweight='bold')
+        ax.set_xticks(time_steps[::8])
+        ax.set_xticklabels([time_labels[i] for i in range(0, 96, 8)], rotation=45, ha='right')
+
+        handles, labels = ax.get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        ax.legend(by_label.values(), by_label.keys(),
+                  loc='upper right', fontsize=11, frameon=True, shadow=True, ncol=2)
+
+        ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8)
+        ax.set_ylim(bottom=0)
+
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.2)
+
+        plt.tight_layout()
+        os.makedirs(output_dir, exist_ok=True)
+
+        filename = f'09{chr(96+day_num)}_典型日{day_num}V2G放电功率曲线_{date_str}.png'
+        plt.savefig(os.path.join(output_dir, filename),
+                    dpi=300, bbox_inches='tight', facecolor='white')
+        plt.close()
+
         print(f"[DONE] Generated: {output_dir}/{filename}")
 
 

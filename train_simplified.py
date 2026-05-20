@@ -140,9 +140,11 @@ def main():
         plot_training_rewards_comparison,
         plot_test_cost_comparison,
         plot_test_pv_utilization_comparison,
+        plot_windowed_pv_utilization_comparison,
         plot_test_peak_valley_comparison,
         plot_battery_soc_comparison,
         plot_ev_load_comparison,
+        plot_v2g_discharge_power_comparison,
         plot_battery_power_comparison
     )
     
@@ -182,6 +184,11 @@ def main():
     print(f"对应日期: {[str(all_test_dates[i]) for i in typical_day_indices]}")
     
     # 3.3 计算典型日指标
+    pv_window_start_hour = 8
+    pv_window_end_hour = 16
+    pv_window_start_idx = pv_window_start_hour * 4
+    pv_window_end_idx = pv_window_end_hour * 4
+
     def calculate_test_cost(loads, pvs, prices):
         """计算测试成本"""
         total_cost = 0
@@ -190,10 +197,29 @@ def main():
             net_load = max(0, loads[i] - pvs[i])
             total_cost += net_load * prices[i] * time_interval
         return total_cost
+
+    def calculate_windowed_pv_metrics(loads, pvs, start_idx=pv_window_start_idx, end_idx=pv_window_end_idx):
+        """计算给定时段内基于逐时消纳累加的光伏消纳指标。"""
+        window_loads = np.array(loads[start_idx:end_idx], dtype=float)
+        window_pvs = np.array(pvs[start_idx:end_idx], dtype=float)
+        window_load_energy = float(np.sum(window_loads) * 0.25)
+        window_pv_energy = float(np.sum(window_pvs) * 0.25)
+        consumed_pv_energy = float(np.sum(np.minimum(window_loads, window_pvs)) * 0.25)
+        if window_pv_energy <= 1e-8:
+            window_pv_util = 0.0
+        else:
+            window_pv_util = consumed_pv_energy / window_pv_energy
+        return {
+            'window_load_energy_kwh': window_load_energy,
+            'window_pv_energy_kwh': window_pv_energy,
+            'window_consumed_pv_energy_kwh': consumed_pv_energy,
+            'window_pv_utilization': window_pv_util
+        }
     
     # 准备绘图数据
     algorithm_costs = {'Baseline': [], 'DDQN': [], 'T-DDQN': [], 'Ablation': [], 'PPO': []}
     algorithm_pv_utils_avg = {'Baseline': [], 'DDQN': [], 'T-DDQN': [], 'Ablation': [], 'PPO': []}  # 用于成本图
+    algorithm_pv_window_metrics = {'Baseline': [], 'DDQN': [], 'T-DDQN': [], 'Ablation': [], 'PPO': []}
     algorithm_loads = {'Baseline': before_loads, 'DDQN': ddqn_test_loads, 
                        'T-DDQN': t_ddqn_test_loads, 'Ablation': ablation_test_loads, 'PPO': ppo_test_loads}
     
@@ -322,6 +348,7 @@ def main():
         day_prices = before_prices[start_idx:end_idx]
         cost = calculate_test_cost(day_loads, day_pvs, day_prices)
         pv_util = np.sum(np.minimum(day_pvs, day_loads)) / (np.sum(day_pvs) + 1e-8)
+        algorithm_pv_window_metrics['Baseline'].append(calculate_windowed_pv_metrics(day_loads, day_pvs))
         algorithm_costs['Baseline'].append(cost)
         algorithm_pv_utils_avg['Baseline'].append(pv_util)
         
@@ -331,6 +358,7 @@ def main():
         day_prices = ddqn_prices[start_idx:end_idx]
         cost = calculate_test_cost(day_loads, day_pvs, day_prices)
         pv_util = np.sum(np.minimum(day_pvs, day_loads)) / (np.sum(day_pvs) + 1e-8)
+        algorithm_pv_window_metrics['DDQN'].append(calculate_windowed_pv_metrics(day_loads, day_pvs))
         algorithm_costs['DDQN'].append(cost)
         algorithm_pv_utils_avg['DDQN'].append(pv_util)
         
@@ -340,6 +368,7 @@ def main():
         day_prices = t_ddqn_prices[start_idx:end_idx]
         cost = calculate_test_cost(day_loads, day_pvs, day_prices)
         pv_util = np.sum(np.minimum(day_pvs, day_loads)) / (np.sum(day_pvs) + 1e-8)
+        algorithm_pv_window_metrics['T-DDQN'].append(calculate_windowed_pv_metrics(day_loads, day_pvs))
         algorithm_costs['T-DDQN'].append(cost)
         algorithm_pv_utils_avg['T-DDQN'].append(pv_util)
         
@@ -349,6 +378,7 @@ def main():
         day_prices = ablation_prices[start_idx:end_idx]
         cost = calculate_test_cost(day_loads, day_pvs, day_prices)
         pv_util = np.sum(np.minimum(day_pvs, day_loads)) / (np.sum(day_pvs) + 1e-8)
+        algorithm_pv_window_metrics['Ablation'].append(calculate_windowed_pv_metrics(day_loads, day_pvs))
         algorithm_costs['Ablation'].append(cost)
         algorithm_pv_utils_avg['Ablation'].append(pv_util)
         
@@ -358,6 +388,7 @@ def main():
         day_prices = ppo_prices[start_idx:end_idx]
         cost = calculate_test_cost(day_loads, day_pvs, day_prices)
         pv_util = np.sum(np.minimum(day_pvs, day_loads)) / (np.sum(day_pvs) + 1e-8)
+        algorithm_pv_window_metrics['PPO'].append(calculate_windowed_pv_metrics(day_loads, day_pvs))
         algorithm_costs['PPO'].append(cost)
         algorithm_pv_utils_avg['PPO'].append(pv_util)
     
@@ -373,6 +404,15 @@ def main():
     # 图3a和3b: 典型日光伏消纳率对比（逐时曲线，2张图）
     plot_test_pv_utilization_comparison(algorithm_pv_utils_timeseries, typical_day_dates_str, 
                                        typical_day_indices, output_dir)
+
+    # 图8a和8b: 典型日光伏时段消纳率对比（8:00-16:00按总量计算，2张图）
+    plot_windowed_pv_utilization_comparison(
+        algorithm_pv_window_metrics,
+        typical_day_dates_str,
+        output_dir,
+        window_start_hour=pv_window_start_hour,
+        window_end_hour=pv_window_end_hour
+    )
     
     # 图4a和4b: 典型日削峰填谷对比（负荷曲线，2张图）
     # 传递光伏数据以显示光伏出力曲线
@@ -438,6 +478,8 @@ def main():
         # 传入None作为baseline_ev_loads，避免重复绘制与真实EV相同的曲线
         plot_ev_load_comparison(algorithm_ev_loads, None, real_ev_loads,
                                typical_day_dates_str, typical_day_indices, output_dir)
+        plot_v2g_discharge_power_comparison(algorithm_ev_loads, real_ev_loads,
+                                           typical_day_dates_str, typical_day_indices, output_dir)
     else:
         print("警告：未找到真实EV数据，跳过EV负荷调度对比图")
     
@@ -449,6 +491,8 @@ def main():
     print("   02_典型日成本对比.png")
     print(f"   03a_典型日1光伏消纳率_{typical_day_dates_str[0]}.png")
     print(f"   03b_典型日2光伏消纳率_{typical_day_dates_str[1]}.png")
+    print(f"   08a_典型日1光伏时段消纳率_{typical_day_dates_str[0]}.png")
+    print(f"   08b_典型日2光伏时段消纳率_{typical_day_dates_str[1]}.png")
     print(f"   04a_典型日1削峰填谷_{typical_day_dates_str[0]}.png")
     print(f"   04b_典型日2削峰填谷_{typical_day_dates_str[1]}.png")
     print(f"   05a_典型日1储能SOC变化_{typical_day_dates_str[0]}.png")
@@ -458,6 +502,8 @@ def main():
     if baseline_ev_loads is not None:
         print(f"   06a_典型日1EV负荷调度对比_{typical_day_dates_str[0]}.png")
         print(f"   06b_典型日2EV负荷调度对比_{typical_day_dates_str[1]}.png")
+        print(f"   09a_典型日1V2G放电功率曲线_{typical_day_dates_str[0]}.png")
+        print(f"   09b_典型日2V2G放电功率曲线_{typical_day_dates_str[1]}.png")
     print(f"\n📅 典型日期: {', '.join(typical_day_dates_str)}")
     print("="*60 + "\n")
     
@@ -596,6 +642,7 @@ def main():
             # 计算关键指标
             total_load_energy = sum(loads_day) * 0.25  # kWh
             total_pv_energy = sum(pvs_day) * 0.25  # kWh
+            windowed_pv_metrics = calculate_windowed_pv_metrics(loads_day, pvs_day)
             
             # 计算成本
             total_cost = 0
@@ -643,11 +690,15 @@ def main():
                 '算法': algo,
                 '总成本(元)': round(total_cost, 2),
                 '平均光伏消纳率(%)': round(avg_pv_util * 100, 2),
+                f'{pv_window_start_hour}:00-{pv_window_end_hour}:00时段光伏消纳率(%)': round(windowed_pv_metrics['window_pv_utilization'] * 100, 2),
                 '峰值负荷(kW)': round(peak_load, 2),
                 '谷值负荷(kW)': round(valley_load, 2),
                 '峰谷差(kW)': round(peak_valley_diff, 2),
                 '总负荷电量(kWh)': round(total_load_energy, 2),
                 '总光伏发电量(kWh)': round(total_pv_energy, 2),
+                f'{pv_window_start_hour}:00-{pv_window_end_hour}:00时段总负荷电量(kWh)': round(windowed_pv_metrics['window_load_energy_kwh'], 2),
+                f'{pv_window_start_hour}:00-{pv_window_end_hour}:00时段总光伏发电量(kWh)': round(windowed_pv_metrics['window_pv_energy_kwh'], 2),
+                f'{pv_window_start_hour}:00-{pv_window_end_hour}:00时段消纳光伏电量(kWh)': round(windowed_pv_metrics['window_consumed_pv_energy_kwh'], 2),
                 'EV总充电量(kWh)': round(total_ev_charge, 2),
                 'EV总放电量(kWh)': round(total_ev_discharge, 2),
                 'EV最大充电功率(kW)': round(max_ev_charge, 2),
@@ -663,6 +714,7 @@ def main():
         if 'Baseline' in df_summary['算法'].values:
             baseline_cost = df_summary[df_summary['算法'] == 'Baseline']['总成本(元)'].values[0]
             baseline_pv_util = df_summary[df_summary['算法'] == 'Baseline']['平均光伏消纳率(%)'].values[0]
+            baseline_window_pv_util = df_summary[df_summary['算法'] == 'Baseline'][f'{pv_window_start_hour}:00-{pv_window_end_hour}:00时段光伏消纳率(%)'].values[0]
             baseline_peak_valley = df_summary[df_summary['算法'] == 'Baseline']['峰谷差(kW)'].values[0]
             
             df_summary['成本降低率(%)'] = df_summary['总成本(元)'].apply(
@@ -671,6 +723,9 @@ def main():
             df_summary['光伏消纳提升(%)'] = df_summary['平均光伏消纳率(%)'].apply(
                 lambda x: round(x - baseline_pv_util, 2)
             )
+            df_summary[f'{pv_window_start_hour}:00-{pv_window_end_hour}:00时段光伏消纳提升(%)'] = df_summary[
+                f'{pv_window_start_hour}:00-{pv_window_end_hour}:00时段光伏消纳率(%)'
+            ].apply(lambda x: round(x - baseline_window_pv_util, 2))
             df_summary['峰谷差降低率(%)'] = df_summary['峰谷差(kW)'].apply(
                 lambda x: round((baseline_peak_valley - x) / baseline_peak_valley * 100, 2)
             )

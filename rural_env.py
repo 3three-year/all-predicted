@@ -603,7 +603,11 @@ class CountrysideEnv(gym.Env):
             
             # 更新EV负荷参数
             self.ev_load.max_power = min(max_real_power * 1.2, 30.0)  # 留20%余量，最大30kW
-            self.ev_load.min_power = max(min_real_power * 1.2, -20.0)  # 留20%余量，最大放电20kW
+
+            # 关键修复：真实EV数据通常只有充电功率，不能用其最小值去覆盖V2G放电下限。
+            # 否则当 min_real_power >= 0 时，会把 min_power 锁成非负，导致EV永远无法放电。
+            discharge_power_cap = min(self.ev_load.max_power * 0.75, 20.0)
+            self.ev_load.min_power = -max(discharge_power_cap, 8.0)  # 至少保留8kW的V2G放电能力
             
             if self.verbose:
                 print(f"基于22年真实EV数据调整参数: max_power={self.ev_load.max_power:.2f}kW, min_power={self.ev_load.min_power:.2f}kW")
@@ -1667,8 +1671,11 @@ class CountrysideEnv(gym.Env):
                 P_task = min(max_positive_power, required_power)
                 Delta_P_pv = 0.60 * algo_pv_bias * max_positive_power * pv_support
                 Delta_P_prog = 0.50 * max_positive_power * prog_support
-                Delta_P_peak = 0.0
+                peak_discharge_mode = False
+                target_power_charge = P_task + Delta_P_pv + Delta_P_prog
 
+                # 关键修复：高峰时段允许EV从“充电模式”切换到“真实V2G放电模式”，
+                # 而不是仅仅在正向充电目标上叠加一个较小的负修正项。
                 if current_net_load > (1.0 + eta_L) * day_mean_net_load and self.ev_load.soc > ev_discharge_soc_threshold:
                     discharge_limit = min(
                         abs(self.ev_load.min_power),
@@ -1679,10 +1686,25 @@ class CountrysideEnv(gym.Env):
                         0.0,
                         1.0
                     )
-                    Delta_P_peak = -min(discharge_limit, k_discharge * abs(self.ev_load.min_power) * net_load_ratio)
 
-                target_power = P_task + Delta_P_pv + Delta_P_prog + Delta_P_peak
-                if target_power >= 0:
+                    # 如果当前充电任务并不紧迫，则优先切到V2G放电模式削峰。
+                    # slack > 0 表示当前进度不落后，可让出部分能量窗口。
+                    if discharge_limit > 0.5 and slack > -0.05:
+                        discharge_strength = max(0.35, k_discharge + 0.25 * net_load_ratio)
+                        target_power_discharge = -min(
+                            discharge_limit,
+                            discharge_strength * abs(self.ev_load.min_power)
+                        )
+                        peak_discharge_mode = True
+                        target_power = target_power_discharge
+                    else:
+                        target_power = target_power_charge
+                else:
+                    target_power = target_power_charge
+
+                if peak_discharge_mode:
+                    target_power = max(target_power, self.ev_load.min_power)
+                elif target_power >= 0:
                     target_power = min(target_power, max_positive_power)
                 else:
                     target_power = max(target_power, self.ev_load.min_power)
